@@ -3,6 +3,7 @@ import mimetypes
 import os
 import pickle
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 import openai  # or any library used to access the LLM model
 from dotenv import load_dotenv
@@ -84,13 +85,44 @@ def get_loader(file_path):
         raise ValueError(f"Unsupported file type: {mime_type}")
 
 
+def process_files_batch(src_files):
+    batch_docs = []
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=5000,
+                                                   chunk_overlap=400)
+    for file_path in src_files:
+        loader = get_loader(file_path)
+        batch_docs.extend(loader.load_and_split(text_splitter=text_splitter))
+    return batch_docs
+
+
 def train_or_load_model(train, faiss_obj_path, file_path, index_name):
     global embeddings
+    batch_size = 100
+
     if train:
-        loader = get_loader(file_path)
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=5000,
-                                                       chunk_overlap=400)
-        pages = loader.load_and_split(text_splitter=text_splitter)
+        # Initialize an empty list to store loaded documents
+        docs = []
+        files_to_process = []
+        for root, dirs, files in os.walk(file_path):
+            files_to_process.extend([os.path.join(root, file) for file in files])
+
+        with ThreadPoolExecutor() as executor:
+            total_files = len(files_to_process)
+            processed_files = 0
+
+            # Iterate through the PDF files in batches
+            for i in range(0, total_files, batch_size):
+                batch = files_to_process[i:i + batch_size]
+                batch_docs = list(executor.map(process_files_batch, [batch]))
+                for batch_result in batch_docs:
+                    docs.extend(batch_result)
+                    processed_files += len(batch)
+                    print(f"Processed {processed_files} / {total_files} files")
+
+        # loader = get_loader(file_path)
+        # text_splitter = RecursiveCharacterTextSplitter(chunk_size=5000,
+        #                                                chunk_overlap=400)
+        # pages = loader.load_and_split(text_splitter=text_splitter)
         # for i in pages:
         #     print("\n ______________")
         #     print(i.page_content)
@@ -104,10 +136,10 @@ def train_or_load_model(train, faiss_obj_path, file_path, index_name):
 
         if os.path.exists(faiss_obj_path):
             faiss_index = FAISS.load(faiss_obj_path)
-            new_embeddings = faiss_index.from_documents(pages, embeddings)
+            new_embeddings = faiss_index.from_documents(docs, embeddings)
             new_embeddings.save(faiss_obj_path)
         else:
-            faiss_index = FAISS.from_documents(pages, embeddings)
+            faiss_index = FAISS.from_documents(docs, embeddings)
             faiss_index.save(faiss_obj_path)
 
         return FAISS.load(faiss_obj_path)
@@ -240,7 +272,7 @@ def setup_chatbot(uploaded_file, model, temperature):
     """
     global faiss_index
     faiss_obj_path = "models/paura.pickle"
-    file_path = "files/IMC_ABPAS_Help_Manual.pdf"
+    file_path = "files/"
     index_name = "paura"
     faiss_index = train_or_load_model(True, faiss_obj_path, file_path, index_name)
     # embeds = Embedder()
